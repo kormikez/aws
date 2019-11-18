@@ -1,0 +1,221 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Allow lambda to sync to CodeCommit, including creating user and service credentials for Git
+
+Resources:
+
+  # This lambda does the actual job of syncing external repo to CodeCommit.
+
+  Git2CodeCommitLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code: lambda/
+      FunctionName: Git2CodeCommit
+      Description: Pull from external repo and push to CodeCommit
+      Handler: git2cc.handler
+      Runtime: python3.7
+      Timeout: 300
+      Role: !GetAtt AWSLambdaBasicExecutionRole.Arn
+      Environment:
+        Variables:
+          src_repo_user: '<UNSET>'
+          src_repo_pass: '<UNSET>'
+          LogLevel: 'INFO'
+
+  # And the execution role, least privilage principle applied.
+
+  AWSLambdaBasicExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Path: /service/
+      RoleName: Git2CodeCommitLambdaExecutionRole
+      Policies:
+        - PolicyName: LambdaGit2CodeCommitPolicy
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: codecommit:createRepository
+                Resource: !Sub  arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action: logs:CreateLogGroup
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/git2ccLambdaUser
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/git2ccLambdaPwd
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Principal:
+              Service: lambda.amazonaws.com
+
+  # SNS topic to which source repo commits shall be subscribed
+
+  Git2ccSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: git2cc-topic
+      Subscription:
+        - Endpoint: !GetAtt Git2CodeCommitLambda.Arn
+          Protocol: lambda
+
+  # ... and a policy for the topic
+
+  Git2ccSNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: AllowInvokeGit2ccLambda
+        Version: '2012-10-17'
+        Statement:
+        - Sid: allow-git-user
+          Effect: Allow
+          Action: sns:Publish
+          Principal: 
+            AWS: !Sub ${AWS::AccountId}
+          Resource: !Ref Git2ccSNSTopic 
+      Topics:
+        - !Ref Git2ccSNSTopic
+
+  # We need to allow the function to be triggered by the topic
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref Git2ccSNSTopic
+      FunctionName: !GetAtt Git2CodeCommitLambda.Arn
+
+  # CodeCommitLambdaIAMUser required for pushing to CodeCommit (yeah, I don't like it either)
+  
+  CodeCommitLambdaIAMUser:
+    Type: AWS::IAM::User
+    Properties:
+      Policies:
+        - PolicyName: CodeCommitPushAndPull
+          PolicyDocument:
+            Statement:
+            - Effect: Allow
+              Action: codecommit:GitPu*
+              Resource: !Sub  arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:*
+      UserName: CodeCommitLambda
+
+  # Custom resource to create service credentials for CodeCommit (not supported by Cloudformation as of late 2019)
+  
+  GitCredentialsResource:
+    Type: 'Custom::GitCredentialsResource'
+    DependsOn: CreateGitCredsForGit2CodeCommitLambda
+    Properties:
+      ServiceToken: !GetAtt
+        - CreateGitCredsForGit2CodeCommitLambda
+        - Arn
+
+  # That inline lambda needs some permissions to create the credentials
+  
+  InlineLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service/
+      RoleName: InlineLambdaExecutionRole
+      Policies:
+        - PolicyName: ServiceCredentialsProvisioning
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:ListServiceSpecificCredentials
+                  - iam:CreateServiceSpecificCredential
+                  - iam:DeleteServiceSpecificCredential
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:user/*
+              - Effect: Allow
+                Action: ssm:PutParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/git2ccLambda*
+
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sts:AssumeRole'
+            Principal:
+              Service: lambda.amazonaws.com
+
+  # Inline lambda to create the credentials via custom resource
+
+  CreateGitCredsForGit2CodeCommitLambda:
+    Type: 'AWS::Lambda::Function'
+    DependsOn:
+      - CodeCommitLambdaIAMUser
+    Properties:
+      FunctionName: CreateGitCredsForGit2CodeCommitLambda
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          def lambda_handler(event, context):
+            response_data = {}
+            if event['RequestType'] == 'Create':
+              try:
+                iam_client = boto3.client('iam')
+                ssc = iam_client.create_service_specific_credential(
+                  UserName='CodeCommitLambda',
+                  ServiceName='codecommit.amazonaws.com'
+                )
+                git_cred_id = ssc['ServiceSpecificCredential']['ServiceSpecificCredentialId']
+                git_username = ssc['ServiceSpecificCredential']['ServiceUserName']
+                git_password = ssc['ServiceSpecificCredential']['ServicePassword']
+                response_data['ServiceUserName'] = git_username
+                response_data['ServicePassword'] = '(available in SSM)'
+                response_data['ServiceCredId'] = git_cred_id
+              except:
+                response_data['ServiceUserName'] = 'ERROR'
+                response_data['ServicePassword'] = 'ERROR'
+                response_data['ServiceCredId'] = 'ERROR'
+                cfnresponse.send(event, context, cfnresponse.FAILED, response_data, '')
+              try:
+                ssm_client = boto3.client('ssm')
+                ssm_client.put_parameter(Name='git2ccLambdaUser',Value=git_username,Type='String',Overwrite=True)
+                ssm_client.put_parameter(Name='git2ccLambdaPwd',Value=git_password,Type='SecureString',Overwrite=True)
+              except:
+                cfnresponse.send(event, context, cfnresponse.FAILED, response_data, '')
+                return 1
+            elif event['RequestType'] == 'Delete':
+              try:
+                iam_client = boto3.client('iam')
+                ssc = iam_client.list_service_specific_credentials(
+                  UserName='CodeCommitLambda',
+                  ServiceName='codecommit.amazonaws.com'
+                )
+                iam_client.delete_service_specific_credential(
+                  UserName='CodeCommitLambda',
+                  ServiceSpecificCredentialId=ssc['ServiceSpecificCredentials'][0]['ServiceSpecificCredentialId']
+                )
+                ssm_client = boto3.client('ssm')
+                ssm_client.delete_parameter(Name='git2ccLambdaUser')
+                ssm_client.delete_parameter(Name='git2ccLambdaPwd')
+              except:
+                cfnresponse.send(event, context, cfnresponse.FAILED, response_data, '')
+            cfnresponse.send(event, context, cfnresponse.SUCCESS, response_data, '')
+      Description: Function to create Git credentials for CodeCommit
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt
+        - InlineLambdaExecutionRole
+        - Arn
+      Runtime: python3.7
+      Timeout: 60
+
+Outputs:
+
+  Git2ccSNSTopic:
+    Export:
+      Name: Git2ccSNSTopic
+    Value: !Ref Git2ccSNSTopic
