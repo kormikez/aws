@@ -12,7 +12,7 @@ You need AWS API access credentials linking to a user/role with IAM capabilities
 
 Your repository must allow a trigger/hook to publish commit messages to AWS SNS (via CLI or SDK). 
 
-You need user and password to your repository, as well as an IAM user that would be able to publish to SNS.
+You must have credentials (user and password) to your repository, as well as an IAM user that would be able to publish to SNS.
 
 
 #### Git module installation
@@ -44,17 +44,17 @@ This will create stack `git2cc-lamba-resources` with following resources:
   * `InlineLambdaExecutionRole` - a role that allows creation of _Service Specific Credentials_ and store them in SSM by the custom resource
     * `CodeCommitLambdaIAMUser` - the CodeCommit user, defined by `GitCredentialsResource` - the actual _Service Specific Credentials_ resource
 * `Git2ccSNSTopic`
-  * `Git2ccSNSTopicPolicy` - policy to allow a user to publish to the SNS topic, which results in executing the code2cc lambda, you may want to change the 
+  * `Git2ccSNSTopicPolicy` - policy to allow a user to publish to the SNS topic, which results in executing the git2cc lambda, you may want to change the 
 
 #### Configuration
 
 This is the tricky part, where you may need to tune this to work with your git repository.
 
-First, go to the newly deployed Lambda and set your repository credantials in following environmental variables:
+First, go to the newly deployed Lambda and put your repository credantials into the following environmental variables:
 - src_repo_user
 - src_repo_pass
 
-If you haven't done this as a prerequisite, to create a user, allow it to publish to SNS permissions and give it API access keys. On your repository side, you need to create a hook, a trigger, or somehow manually trigger publish to SNS. 
+In case you missed that pre-requisite, create an IAM user, allow it to publish to SNS and grant it API access. On your repository side, you need to create a hook, a trigger, or somehow "manually" trigger publish to SNS. 
 
 At a minimum the SNS message shall contain the following:
 ```
