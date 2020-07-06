@@ -1,0 +1,22 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "STS",
+            "Effect": "Allow",
+            "Action": "sts:*",
+            "Resource": "*"
+        },
+        {
+            "Sid": "",
+            "Effect": "Allow",
+            "Action": [
+                "logs:PutLogEvents",
+                "logs:CreateLogStream",
+                "logs:CreateLogGroup",
+                "iam:ListAccountAliases"
+            ],
+            "Resource": "*"
+        }
+    ]
+}

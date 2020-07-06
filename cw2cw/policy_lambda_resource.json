@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Id": "default",
+  "Statement": [
+    {
+      "Sid": "AllowExecutionFromCloudWatch",
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "logs.amazonaws.com"
+      },
+      "Action": "lambda:InvokeFunction",
+      "Resource": "arn:aws:lambda:*"
+    }
+  ]
+}
